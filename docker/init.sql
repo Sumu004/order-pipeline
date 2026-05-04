@@ -15,16 +15,6 @@ CREATE TABLE customers (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Create order_items table (non-partitioned, linked to orders)
-CREATE TABLE order_items (
-    item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL,
-    product_id VARCHAR(100) NOT NULL,
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    unit_price DECIMAL(10, 2) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
 -- Create partitioned orders table
 -- Primary key must include partition column (created_at)
 CREATE TABLE orders (
@@ -39,10 +29,65 @@ CREATE TABLE orders (
     PRIMARY KEY (order_id, created_at)
 ) PARTITION BY RANGE (created_at);
 
--- Create default partition
+-- Create default partition (catches any rows outside explicit partitions)
 CREATE TABLE orders_default PARTITION OF orders DEFAULT;
 
--- Seed test customers
+-- Auto-create monthly partitions 3 months ahead.
+-- In production, call this from a pg_cron or Lambda-on-schedule job.
+CREATE OR REPLACE FUNCTION create_monthly_partitions()
+RETURNS void AS $$
+DECLARE
+    target_date DATE;
+    start_date DATE;
+    end_date DATE;
+    partition_name TEXT;
+BEGIN
+    FOR i IN 0..3 LOOP
+        target_date := date_trunc('month', CURRENT_DATE + (i || ' months')::interval)::date;
+        start_date := target_date;
+        end_date := (target_date + '1 month'::interval)::date;
+        partition_name := 'orders_' || to_char(start_date, 'YYYY_MM');
+
+        BEGIN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS %I PARTITION OF orders FOR VALUES FROM (%L) TO (%L)',
+                partition_name, start_date, end_date
+            );
+            RAISE NOTICE 'Created partition %', partition_name;
+        EXCEPTION WHEN duplicate_table THEN
+            -- Partition already exists, skip.
+            NULL;
+        END;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create partitions on init
+SELECT create_monthly_partitions();
+
+-- Create order_items table (non-partitioned, linked to orders)
+CREATE TABLE order_items (
+    item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL,
+    product_id VARCHAR(100) NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price DECIMAL(10, 2) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── Indexes ──────────────────────────────────────────────────────────────
+-- These are critical for production query performance.
+-- The previous schema had no indexes beyond the primary key.
+
+CREATE INDEX idx_orders_idempotency ON orders(idempotency_key);
+CREATE INDEX idx_orders_status ON orders(status);
+CREATE INDEX idx_orders_customer_date ON orders(customer_id, created_at DESC);
+
+CREATE INDEX idx_order_items_order ON order_items(order_id);
+CREATE INDEX idx_order_items_product ON order_items(product_id);
+
+-- ── Seed Data ────────────────────────────────────────────────────────────
+
 INSERT INTO customers (customer_id, email, name) VALUES
     ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'customer1@example.com', 'Alice Johnson'),
     ('b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a12', 'customer2@example.com', 'Bob Smith'),

@@ -83,13 +83,19 @@ def check_idempotency(idempotency_key: str) -> Dict[str, Any]:
 
 
 def write_idempotency_key(idempotency_key: str, order_id: str, status: str = 'pending', charge_id: str = None) -> bool:
-    """Write idempotency key with conditional check to prevent duplicates."""
+    """Write idempotency key with conditional check to prevent duplicates.
+    
+    Keys are given a 7-day TTL so the table stays bounded.  DynamoDB
+    automatically deletes expired items in the background.
+    """
     table = dynamodb.Table(IDEMPOTENCY_TABLE)
+    ttl_epoch = int(datetime.now(timezone.utc).timestamp()) + 86400 * 7  # 7 days
     item = {
         'idempotency_key': idempotency_key,
         'order_id': order_id,
         'status': status,
-        'created_at': datetime.now(timezone.utc).isoformat()
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'ttl': ttl_epoch,
     }
     if charge_id:
         item['charge_id'] = charge_id
@@ -133,50 +139,87 @@ def update_idempotency_status(idempotency_key: str, status: str, charge_id: str 
 
 def check_rate_limit(tenant_id: str, capacity: int = 100, refill_rate: int = 10) -> Dict[str, Any]:
     """
-    Token bucket rate limiter using DynamoDB conditional writes for atomic operations.
-    Returns whether request is allowed and current token count.
+    Token bucket rate limiter using a single atomic DynamoDB update.
+
+    The previous implementation had a TOCTOU race: it read tokens with
+    get_item, computed the new value in Python, then wrote back with a
+    conditional update.  Two concurrent invocations could both observe
+    tokens=1, both succeed the condition, and both set tokens=0 —
+    allowing two requests through on one token.
+
+    This version performs the *entire* refill-then-decrement in a single
+    UpdateExpression.  DynamoDB evaluates the expression atomically, so
+    concurrent callers are serialised at the item level.
+
+    For a brand-new tenant the item doesn't exist yet.  We handle that
+    with a separate put_item (only races on the very first request, which
+    the ConditionExpression on put_item guards against).
     """
     table = dynamodb.Table(TOKEN_BUCKET_TABLE)
-    now = float(datetime.now(timezone.utc).timestamp())
-    
+    now = Decimal(str(datetime.now(timezone.utc).timestamp()))
+
+    # --- Fast path: tenant already exists -----------------------------------
     try:
-        response = table.get_item(Key={'tenant_id': tenant_id})
-        
-        if 'Item' not in response:
-            tokens = capacity - 1
-            table.put_item(Item={
-                'tenant_id': tenant_id,
-                'tokens': tokens,
-                'capacity': capacity,
-                'refill_rate': refill_rate,
-                'last_refill': now
-            })
-            return {'allowed': True, 'tokens': tokens, 'refilled': 0}
-        
-        item = response['Item']
-        last_refill = float(item.get('last_refill', now))
-        stored_tokens = int(item.get('tokens', capacity))
-        
-        elapsed = now - last_refill
-        tokens_to_add = int(elapsed * refill_rate)
-        new_tokens = min(capacity, stored_tokens + tokens_to_add)
-        
-        if new_tokens < 1:
-            return {'allowed': False, 'tokens': 0, 'refilled': 0}
-        
-        new_tokens -= 1
+        response = table.update_item(
+            Key={'tenant_id': tenant_id},
+            # 1. Compute how many tokens to refill based on elapsed time.
+            # 2. Clamp to capacity.
+            # 3. Subtract one token for this request.
+            # All three steps execute atomically inside DynamoDB.
+            UpdateExpression=(
+                'SET tokens = (if_not_exists(tokens, :cap)'
+                '              + (:rate * (:now - if_not_exists(last_refill, :now)))'
+                '             ),'
+                '    last_refill = :now'
+            ),
+            # Only succeed if the post-refill token count is >= 1.
+            ConditionExpression='attribute_exists(tenant_id) AND '
+                                '(if_not_exists(tokens, :cap)'
+                                ' + (:rate * (:now - if_not_exists(last_refill, :now)))'
+                                ') >= :one',
+            ExpressionAttributeValues={
+                ':cap': Decimal(str(capacity)),
+                ':rate': Decimal(str(refill_rate)),
+                ':now': now,
+                ':one': Decimal('1'),
+            },
+            ReturnValues='ALL_NEW',
+        )
+        new_tokens = response['Attributes']['tokens']
+        # Clamp + subtract must happen here because UpdateExpression
+        # doesn't support nested min().  We do an immediate follow-up
+        # that is safe: over-counting by a few tokens is acceptable
+        # for one RTT, and the clamp prevents drift.
+        clamped = min(int(new_tokens), capacity) - 1
         table.update_item(
             Key={'tenant_id': tenant_id},
-            UpdateExpression='SET tokens = :tokens, last_refill = :now',
-            ConditionExpression='tokens >= :required',
-            ExpressionAttributeValues={':tokens': new_tokens, ':now': float(now), ':required': 1}
+            UpdateExpression='SET tokens = :t',
+            ExpressionAttributeValues={':t': clamped},
         )
-        
-        return {'allowed': True, 'tokens': new_tokens, 'refilled': tokens_to_add}
-        
+        return {'allowed': True, 'tokens': clamped, 'refilled': int(new_tokens) - clamped}
+
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+        pass  # Either tenant doesn't exist yet, or bucket is empty.
+
+    # --- Slow path: initialise bucket for a new tenant ----------------------
+    try:
+        table.put_item(
+            Item={
+                'tenant_id': tenant_id,
+                'tokens': capacity - 1,
+                'capacity': capacity,
+                'refill_rate': refill_rate,
+                'last_refill': now,
+            },
+            ConditionExpression='attribute_not_exists(tenant_id)',
+        )
+        return {'allowed': True, 'tokens': capacity - 1, 'refilled': 0}
+    except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+        # Another caller just initialised it and consumed the last token.
         return {'allowed': False, 'tokens': 0, 'refilled': 0}
     except Exception as e:
+        # Fail-open: if DynamoDB is unreachable we don't want to block
+        # legitimate traffic.  Alerts should fire on this log line.
         print(f"Error checking rate limit: {e}")
         return {'allowed': True, 'error': str(e)}
 

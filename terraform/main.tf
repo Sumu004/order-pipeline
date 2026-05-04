@@ -163,7 +163,7 @@ resource "aws_dynamodb_table" "idempotency_keys" {
   
   ttl {
     attribute_name = "ttl"
-    enabled      = false
+    enabled      = true
   }
   
   tags = local.tags
@@ -198,24 +198,63 @@ resource "aws_iam_role" "lambda_exec" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_basic" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
+resource "aws_iam_role_policy" "lambda_scoped" {
+  name = "${local.project_name}-lambda-scoped-${var.environment}"
+  role = aws_iam_role.lambda_exec.id
 
-resource "aws_iam_role_policy_attachment" "lambda_sqs" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSQSFullAccess"
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_s3" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_dynamodb" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SQSAccess"
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:ChangeMessageVisibility",
+        ]
+        Resource = [
+          aws_sqs_queue.inventory.arn,
+          aws_sqs_queue.payment.arn,
+          aws_sqs_queue.fulfillment.arn,
+          aws_sqs_queue.dlq.arn,
+        ]
+      },
+      {
+        Sid    = "DynamoDBAccess"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+        ]
+        Resource = [
+          aws_dynamodb_table.orders.arn,
+          "${aws_dynamodb_table.orders.arn}/index/*",
+          aws_dynamodb_table.idempotency_keys.arn,
+          aws_dynamodb_table.token_buckets.arn,
+        ]
+      },
+      {
+        Sid      = "S3ReceiptsWrite"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.receipts.arn}/receipts/*"
+      },
+      {
+        Sid    = "CloudWatchMetrics"
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:PutMetricData",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
 }
 
 # Lambda Function
