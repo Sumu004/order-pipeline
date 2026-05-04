@@ -129,26 +129,25 @@ jobs:
         run: |
           cd order-pipeline
           python -c "
-import boto3
-import os
-os.environ['AWS_ACCESS_KEY_ID'] = 'test'
-os.environ['AWS_SECRET_ACCESS_KEY'] = 'test'
-os.environ['DYNAMODB_ENDPOINT'] = 'http://localhost:4566'
-os.environ['SQS_ENDPOINT'] = 'http://localhost:4566'
-os.environ['S3_ENDPOINT'] = 'http://localhost:4566'
-
-# Test Lambda handler
-from lambda_handlers.handler import handle_place_order, check_rate_limit
-
-# Test idempotency
-result = handle_place_order({
-    'customer_id': 'test-cust',
-    'items': [{'product_id': 'PROD-001', 'quantity': 1, 'price': 10.0}],
-    'tenant_id': 'test-tenant'
-})
-print('Place order result:', result)
-print('Integration tests passed!')
-"
+          import boto3
+          import os
+          os.environ['AWS_ACCESS_KEY_ID'] = 'test'
+          os.environ['AWS_SECRET_ACCESS_KEY'] = 'test'
+          os.environ['DYNAMODB_ENDPOINT'] = 'http://localhost:4566'
+          os.environ['SQS_ENDPOINT'] = 'http://localhost:4566'
+          os.environ['S3_ENDPOINT'] = 'http://localhost:4566'
+          
+          from lambda_handlers.ingest import handle_place_order
+          from lambda_handlers.shared.rate_limiter import check as check_rate_limit
+          
+          result = handle_place_order({
+              'customer_id': 'test-cust',
+              'items': [{'product_id': 'PROD-001', 'quantity': 1, 'price': 10.0}],
+              'tenant_id': 'test-tenant'
+          })
+          print('Place order result:', result)
+          print('Integration tests passed!')
+          "
       
       - name: Cleanup
         if: always()
