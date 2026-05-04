@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+coverage.xml
+*.egg-info/
+dist/
+build/
+.env
+*.tfstate
+*.tfstate.backup
+.terraform/
