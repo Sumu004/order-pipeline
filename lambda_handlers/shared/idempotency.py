@@ -7,7 +7,7 @@ concurrent Lambda invocations.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Dict, Any
 
 from lambda_handlers.shared.config import dynamodb, IDEMPOTENCY_TABLE
 from lambda_handlers.shared.logging import get_logger

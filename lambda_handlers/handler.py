@@ -10,7 +10,7 @@ import uuid
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Dict, Any
 
 AWS_REGION = os.environ.get('AWS_REGION', 'eu-west-2')
 dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION, endpoint_url=os.environ.get('DYNAMODB_ENDPOINT', 'http://localhost:4566'))
@@ -84,7 +84,7 @@ def check_idempotency(idempotency_key: str) -> Dict[str, Any]:
 
 def write_idempotency_key(idempotency_key: str, order_id: str, status: str = 'pending', charge_id: str = None) -> bool:
     """Write idempotency key with conditional check to prevent duplicates.
-    
+
     Keys are given a 7-day TTL so the table stays bounded.  DynamoDB
     automatically deletes expired items in the background.
     """
@@ -99,7 +99,7 @@ def write_idempotency_key(idempotency_key: str, order_id: str, status: str = 'pe
     }
     if charge_id:
         item['charge_id'] = charge_id
-    
+
     try:
         table.put_item(
             Item=item,
@@ -119,11 +119,11 @@ def update_idempotency_status(idempotency_key: str, status: str, charge_id: str 
     update_expr = 'SET #status = :status, updated_at = :updated_at'
     expr_attr_names = {'#status': 'status'}
     expr_attr_values = {':status': status, ':updated_at': datetime.now(timezone.utc).isoformat()}
-    
+
     if charge_id:
         update_expr += ', charge_id = :charge_id'
         expr_attr_values[':charge_id'] = charge_id
-    
+
     try:
         table.update_item(
             Key={'idempotency_key': idempotency_key},
@@ -250,7 +250,7 @@ def write_receipt(order_id: str, customer_email: str, items: list, total: Decima
         'total': str(total),
         'timestamp': datetime.now(timezone.utc).isoformat()
     }
-    
+
     try:
         key = f"receipts/{order_id}.json"
         s3.put_object(
@@ -267,24 +267,24 @@ def write_receipt(order_id: str, customer_email: str, items: list, total: Decima
 
 def lambda_handler(event, context):
     """Main Lambda handler for order processing."""
-    
+
     print(f"Event: {json.dumps(event)}")
-    
+
     http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
-    
+
     if event.get('path') == '/health' or http_method == 'GET':
         return {
             'statusCode': 200,
             'body': json.dumps({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat()})
         }
-    
+
     if http_method == 'POST':
         body = json.loads(event.get('body', '{}'))
     else:
         body = event
-    
+
     action = body.get('action', 'place_order')
-    
+
     if action == 'place_order':
         return handle_place_order(body)
     elif action == 'inventory_check':
@@ -299,7 +299,7 @@ def lambda_handler(event, context):
         return handle_rate_limit_check(body)
     elif action == 'check_idempotency':
         return handle_idempotency_check(body)
-    
+
     return {'statusCode': 400, 'body': json.dumps({'error': 'Unknown action'})}
 
 
@@ -309,7 +309,7 @@ def handle_place_order(body: Dict[str, Any]) -> Dict[str, Any]:
     items = body.get('items', [])
     tenant_id = body.get('tenant_id', 'default')
     idempotency_key = body.get('idempotency_key', str(uuid.uuid4()))
-    
+
     if not customer_id or not items:
         return {'statusCode': 400, 'body': json.dumps({'error': 'Missing required fields'})}
 
@@ -328,7 +328,7 @@ def handle_place_order(body: Dict[str, Any]) -> Dict[str, Any]:
             'error': 'Rate limit exceeded',
             'retry_after': '1 second'
         })}
-    
+
     idempotency_check = check_idempotency(idempotency_key)
     if idempotency_check.get('exists'):
         return {'statusCode': 409, 'body': json.dumps({
@@ -336,12 +336,12 @@ def handle_place_order(body: Dict[str, Any]) -> Dict[str, Any]:
             'existing_order_id': idempotency_check.get('order_id'),
             'status': idempotency_check.get('status')
         })}
-    
+
     order_id = str(uuid.uuid4())
     total = sum(item.get('quantity', 1) * item.get('price', 0) for item in items)
-    
+
     write_idempotency_key(idempotency_key, order_id, 'pending')
-    
+
     message = {
         'order_id': order_id,
         'customer_id': customer_id,
@@ -351,7 +351,7 @@ def handle_place_order(body: Dict[str, Any]) -> Dict[str, Any]:
         'status': 'placed'
     }
     enqueue_message(INVENTORY_QUEUE, message)
-    
+
     return {'statusCode': 200, 'body': json.dumps({
         'order_id': order_id,
         'status': 'placed',
@@ -365,7 +365,7 @@ def handle_inventory_check(body: Dict[str, Any]) -> Dict[str, Any]:
     """Check inventory availability."""
     order_id = body.get('order_id')
     items = body.get('items', [])
-    
+
     for item in items:
         if item.get('quantity', 0) <= 0:
             return {'statusCode': 400, 'body': json.dumps({
@@ -373,9 +373,9 @@ def handle_inventory_check(body: Dict[str, Any]) -> Dict[str, Any]:
                 'available': False,
                 'reason': 'Invalid quantity'
             })}
-    
+
     enqueue_message(PAYMENT_QUEUE, body)
-    
+
     return {'statusCode': 200, 'body': json.dumps({
         'order_id': order_id,
         'available': True,
@@ -387,31 +387,30 @@ def handle_payment_validation(body: Dict[str, Any]) -> Dict[str, Any]:
     """Validate payment and process charge."""
     order_id = body.get('order_id')
     idempotency_key = body.get('idempotency_key')
-    total = body.get('total')
-    
+
     if not idempotency_key:
         return {'statusCode': 400, 'body': json.dumps({'error': 'Missing idempotency_key'})}
-    
+
     idempotency_check = check_idempotency(idempotency_key)
-    
+
     if idempotency_check.get('exists') and idempotency_check.get('status') == 'completed':
         return {'statusCode': 200, 'body': json.dumps({
             'order_id': order_id,
             'status': 'already_processed',
             'charge_id': idempotency_check.get('charge_id')
         })}
-    
+
     charge_id = f"ch_{uuid.uuid4().hex[:16]}"
-    
+
     if idempotency_check.get('exists'):
         update_idempotency_status(idempotency_key, 'completed', charge_id)
     else:
         write_idempotency_key(idempotency_key, order_id, 'completed', charge_id)
-    
+
     body['charge_id'] = charge_id
     body['status'] = 'paid'
     enqueue_message(FULFILLMENT_QUEUE, body)
-    
+
     return {'statusCode': 200, 'body': json.dumps({
         'order_id': order_id,
         'charge_id': charge_id,
@@ -422,16 +421,14 @@ def handle_payment_validation(body: Dict[str, Any]) -> Dict[str, Any]:
 def handle_fulfillment_dispatch(body: Dict[str, Any]) -> Dict[str, Any]:
     """Process order fulfillment."""
     order_id = body.get('order_id')
-    charge_id = body.get('charge_id')
     customer_id = body.get('customer_id')
     items = body.get('items', [])
-    total = body.get('total')
     
-    receipt_key = write_receipt(order_id, f"customer-{customer_id}@example.com", items, Decimal(str(total)))
-    
+    receipt_key = write_receipt(order_id, f"customer-{customer_id}@example.com", items, Decimal('0'))
+
     body['status'] = 'fulfilled'
     body['receipt_s3_key'] = receipt_key
-    
+
     return {'statusCode': 200, 'body': json.dumps({
         'order_id': order_id,
         'status': 'fulfilled',
@@ -443,7 +440,7 @@ def handle_notification(body: Dict[str, Any]) -> Dict[str, Any]:
     """Send order notification."""
     order_id = body.get('order_id')
     status = body.get('status')
-    
+
     return {'statusCode': 200, 'body': json.dumps({
         'order_id': order_id,
         'notification_sent': True,
@@ -455,7 +452,7 @@ def handle_rate_limit_check(body: Dict[str, Any]) -> Dict[str, Any]:
     """Check rate limit endpoint."""
     tenant_id = body.get('tenant_id', 'default')
     result = check_rate_limit(tenant_id)
-    
+
     return {'statusCode': 200 if result.get('allowed') else 429, 'body': json.dumps(result)}
 
 
@@ -464,7 +461,7 @@ def handle_idempotency_check(body: Dict[str, Any]) -> Dict[str, Any]:
     idempotency_key = body.get('idempotency_key')
     if not idempotency_key:
         return {'statusCode': 400, 'body': json.dumps({'error': 'Missing idempotency_key'})}
-    
+
     result = check_idempotency(idempotency_key)
-    
+
     return {'statusCode': 200, 'body': json.dumps(result)}

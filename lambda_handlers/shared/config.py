@@ -22,11 +22,11 @@ dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION,
 
 # SQS
 sqs = boto3.client('sqs', region_name=AWS_REGION,
-                    **({'endpoint_url': _SQS_ENDPOINT} if _SQS_ENDPOINT else {}))
+                   **({'endpoint_url': _SQS_ENDPOINT} if _SQS_ENDPOINT else {}))
 
 # S3
 s3 = boto3.client('s3', region_name=AWS_REGION,
-                   **({'endpoint_url': _S3_ENDPOINT} if _S3_ENDPOINT else {}))
+                  **({'endpoint_url': _S3_ENDPOINT} if _S3_ENDPOINT else {}))
 
 # CloudWatch
 cloudwatch = boto3.client('cloudwatch', region_name=AWS_REGION,

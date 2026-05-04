@@ -11,9 +11,8 @@ trivially parseable by any log-aggregation pipeline.
 """
 
 import json
-import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
 
 
 class StructuredLogger:
